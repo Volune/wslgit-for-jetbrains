@@ -10,7 +10,6 @@ extern crate regex;
 
 use regex::Regex;
 
-
 fn get_drive_letter(pc: &PrefixComponent) -> Option<String> {
     let drive_byte = match pc.kind() {
         Prefix::VerbatimDisk(d) => Some(d),
@@ -88,53 +87,6 @@ fn translate_path_to_win_output(line: &[u8]) -> Cow<[u8]> {
                 .expect("Failed to compile WSLPATH regex");
     }
     WSLPATH_RE.replace_all(line, &b"${drive}:${path}"[..])
-}
-
-fn shell_escape(arg: String) -> String {
-    // ToDo: This really only handles arguments with spaces and newlines.
-    // More complete shell escaping is required for the general case.
-    if arg.contains(" ") {
-        return vec![
-            String::from("\""),
-            arg,
-            String::from("\"")].join("");
-    }
-    arg.replace("\n", "$'\n'")
-}
-
-fn unquote(s: String) -> String {
-    if s.starts_with('"') {
-        return s.get(1..(s.len() - 1)).map(String::from).unwrap_or(s);
-    }
-    s
-}
-
-fn resolve_actual_win_path(win_path: &Path) -> Option<String> {
-    ["", "CMD", "EXE"]
-        .iter()
-        .map(|ext| win_path.with_extension(ext))
-        .map(|p| {
-            println!("path {}", p.to_str().unwrap_or(""));
-            p
-        })
-        .find(|p| p.exists())?
-        .canonicalize().ok()?
-        .to_str()
-        .map(String::from)
-}
-
-fn translate_git_editor(editor: String) -> String {
-    let editor_parts: Vec<&str> = editor.splitn(2, " ").collect();
-    let unquoted_editor_cmd = unquote(String::from(editor_parts[0]));
-    let win_path = Path::new(&unquoted_editor_cmd);
-    let unix_path = resolve_actual_win_path(win_path)
-        .map(|actual_win_path| translate_path_to_unix(actual_win_path))
-        .unwrap_or(String::from(editor_parts[0]));
-
-    return [
-        unix_path,
-        String::from(editor_parts[1])
-    ].join(" ");
 }
 
 fn main() {
