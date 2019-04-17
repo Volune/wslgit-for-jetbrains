@@ -4,9 +4,11 @@ use std::io::{self, Write};
 use std::borrow::Cow;
 use std::path::{Path, Component, PrefixComponent, Prefix};
 
-#[macro_use] extern crate lazy_static;
+#[macro_use]
+extern crate lazy_static;
 extern crate regex;
-use regex::bytes::Regex;
+
+use regex::Regex;
 
 
 fn get_drive_letter(pc: &PrefixComponent) -> Option<String> {
@@ -30,7 +32,7 @@ fn get_prefix_for_drive(drive: &str) -> String {
 fn translate_path_to_unix(argument: String) -> String {
     {
         let (argname, arg) = if argument.starts_with("--")
-                             && argument.contains('=') {
+            && argument.contains('=') {
             let parts: Vec<&str> = argument
                 .splitn(2, '=')
                 .collect();
@@ -49,7 +51,7 @@ fn translate_path_to_unix(argument: String) -> String {
                                          win_path));
                             acc.push_str(&get_prefix_for_drive(&d));
                         }
-                        Component::RootDir => {},
+                        Component::RootDir => {}
                         _ => {
                             let d = c.as_os_str().to_str()
                                 .expect(
@@ -70,10 +72,19 @@ fn translate_path_to_unix(argument: String) -> String {
     argument
 }
 
-fn translate_path_to_win(line: &[u8]) -> Cow<[u8]> {
+fn translate_path_to_win(unix_path: String) -> String {
     lazy_static! {
         static ref WSLPATH_RE: Regex =
             Regex::new(r"(?m-u)/mnt/(?P<drive>[A-Za-z])(?P<path>/\S*)")
+                .expect("Failed to compile WSLPATH regex");
+    }
+    String::from(WSLPATH_RE.replace(unix_path.as_str(), "${drive}:${path}"))
+}
+
+fn translate_path_to_win_output(line: &[u8]) -> Cow<[u8]> {
+    lazy_static! {
+        static ref WSLPATH_RE: regex::bytes::Regex =
+            regex::bytes::Regex::new(r"(?m-u)/mnt/(?P<drive>[A-Za-z])(?P<path>/\S*)")
                 .expect("Failed to compile WSLPATH regex");
     }
     WSLPATH_RE.replace_all(line, &b"${drive}:${path}"[..])
@@ -91,94 +102,100 @@ fn shell_escape(arg: String) -> String {
     arg.replace("\n", "$'\n'")
 }
 
-fn use_interactive_shell() -> bool {
-    // check for explicit environment variable setting
-    if let Ok(interactive_flag) = env::var("WSLGIT_USE_INTERACTIVE_SHELL") {
-        if interactive_flag == "false" || interactive_flag == "0" {
-            return false;
-        }
+fn unquote(s: String) -> String {
+    if s.starts_with('"') {
+        return s.get(1..(s.len() - 1)).map(String::from).unwrap_or(s);
     }
-    // check for advanced usage indicated by BASH_ENV and WSLENV=BASH_ENV
-    else if env::var("BASH_ENV").is_ok() {
-        if let Ok(wslenv) = env::var("WSLENV") {
-            if wslenv.split(':').position(|r| r.eq_ignore_ascii_case("BASH_ENV")).is_some() {
-                return false;
-            }
-        }
-    }
-    true
+    s
 }
 
+fn resolve_actual_win_path(win_path: &Path) -> Option<String> {
+    ["", "CMD", "EXE"]
+        .iter()
+        .map(|ext| win_path.with_extension(ext))
+        .map(|p| {
+            println!("path {}", p.to_str().unwrap_or(""));
+            p
+        })
+        .find(|p| p.exists())?
+        .canonicalize().ok()?
+        .to_str()
+        .map(String::from)
+}
+
+fn translate_git_editor(editor: String) -> String {
+    let editor_parts: Vec<&str> = editor.splitn(2, " ").collect();
+    let unquoted_editor_cmd = unquote(String::from(editor_parts[0]));
+    let win_path = Path::new(&unquoted_editor_cmd);
+    let unix_path = resolve_actual_win_path(win_path)
+        .map(|actual_win_path| translate_path_to_unix(actual_win_path))
+        .unwrap_or(String::from(editor_parts[0]));
+
+    return [
+        unix_path,
+        String::from(editor_parts[1])
+    ].join(" ");
+}
 
 fn main() {
-    let mut cmd_args = Vec::new();
     let cwd_unix = translate_path_to_unix(env::current_dir().unwrap().to_string_lossy().into_owned());
-    let mut git_args: Vec<String> = vec![String::from("cd"), cwd_unix, String::from("&&"), String::from("git")];
-    let git_cmd: String;
+    let mut args: Vec<String> = vec![];
+    let mut git_proc_setup;
+    let mut translate_output = false;
 
-    // process git command arguments
-    git_args.extend(env::args().skip(1)
-        .map(translate_path_to_unix));
-
-    if use_interactive_shell() {
-        cmd_args.push("bash".to_string());
-        cmd_args.push("-ic".to_string());
-        git_cmd = git_args.into_iter().map(shell_escape).collect::<Vec<String>>().join(" ");
-        cmd_args.push(git_cmd.clone());
-    }
-    else {
-        git_cmd = git_args.join(" ");
-        cmd_args = git_args;
-    }
-
-    // setup stdin/stdout
-    let stdin_mode = if env::args().last().unwrap() == "--version" {
-        // For some reason, the git subprocess seems to hang, waiting for
-        // input, when VS Code 1.17.2 tries to detect if `git --version` works
-        // on Windows 10 1709 (specifically, in `findSpecificGit` in the
-        // VS Code source file `extensions/git/src/git.ts`).
-        // To workaround this, we only pass stdin to the git subprocess
-        // for all other commands, but not for the initial `--version` check.
-        // Stdin is needed for example when commiting, where the commit
-        // message is passed on stdin.
-        Stdio::null()
+    if env::args().nth(1).unwrap_or_default() == "win-cmd" {
+        git_proc_setup = Command::new("cmd");
+        args.push(String::from("/c"));
+        args.extend(env::args().skip(2).map(translate_path_to_win));
     } else {
-        Stdio::inherit()
-    };
+        git_proc_setup = Command::new("wsl");
+        args.push(String::from("git"));
+        args.extend(env::args().skip(1).map(translate_path_to_unix));
+
+        // add git commands that must use translate_path_to_win
+        const TRANSLATED_CMDS: &[&str] = &["rev-parse", "remote"];
+        translate_output =
+            env::args().skip(1).position(|arg| TRANSLATED_CMDS.iter().position(|&tcmd| tcmd == arg).is_some()).is_some();
+
+        let wslgit_cmd = translate_path_to_unix(env::args().nth(0).expect("Cannot find args[0]"));
+        match env::var("GIT_EDITOR") {
+            Ok(val) => {
+                git_proc_setup
+                    .env("GIT_EDITOR", wslgit_cmd + " win-cmd " + val.as_str())
+                    .env("WSLENV", "GIT_EDITOR/u");
+            }
+            _ => {}
+        }
+    }
 
     // setup the git subprocess launched inside WSL
-    let mut git_proc_setup = Command::new("wsl");
-    git_proc_setup.args(&cmd_args)
-        .stdin(stdin_mode);
+    git_proc_setup
+        .args(&args)
+        .stdin(Stdio::inherit());
     let status;
-
-    // add git commands that must use translate_path_to_win
-    const TRANSLATED_CMDS: &[&str] = &["rev-parse", "remote"];
-
-    let translate_output =
-       env::args().skip(1).position(|arg| TRANSLATED_CMDS.iter().position(|&tcmd| tcmd == arg).is_some()).is_some();
 
     if translate_output {
         // run the subprocess and capture its output
         let git_proc = git_proc_setup.stdout(Stdio::piped())
             .spawn()
-            .expect(&format!("Failed to execute command '{}'", &git_cmd));
+            .expect(&format!("Failed to execute command '{}'", args.join(" ")));
         let output = git_proc
             .wait_with_output()
-            .expect(&format!("Failed to wait for git call '{}'", &git_cmd));
+            .expect(&format!("Failed to wait for git call '{}'", args.join(" ")));
         status = output.status;
         let output_bytes = output.stdout;
         let mut stdout = io::stdout();
         stdout
-            .write_all(&translate_path_to_win(&output_bytes))
+            .write_all(&translate_path_to_win_output(&output_bytes))
             .expect("Failed to write git output");
         stdout.flush().expect("Failed to flush output");
-    }
-    else {
+    } else {
         // run the subprocess without capturing its output
         // the output of the subprocess is passed through unchanged
-        status = git_proc_setup.status()
-            .expect(&format!("Failed to execute command '{}'", &git_cmd));
+        status = git_proc_setup
+            .stdout(Stdio::inherit())
+            .status()
+            .expect(&format!("Failed to execute command '{}'", args.join(" ")));
     }
 
     // forward any exit code
@@ -201,22 +218,22 @@ fn win_to_unix_path_trans() {
 #[test]
 fn unix_to_win_path_trans() {
     assert_eq!(
-        &*translate_path_to_win(b"/mnt/d/some path/a file.md"),
+        &*translate_path_to_win_output(b"/mnt/d/some path/a file.md"),
         b"d:/some path/a file.md");
     assert_eq!(
-        &*translate_path_to_win(b"origin  /mnt/c/path/ (fetch)"),
+        &*translate_path_to_win_output(b"origin  /mnt/c/path/ (fetch)"),
         b"origin  c:/path/ (fetch)");
     let multiline = b"mirror  /mnt/c/other/ (fetch)\nmirror  /mnt/c/other/ (push)\n";
     let multiline_result = b"mirror  c:/other/ (fetch)\nmirror  c:/other/ (push)\n";
     assert_eq!(
-        &*translate_path_to_win(&multiline[..]),
+        &*translate_path_to_win_output(&multiline[..]),
         &multiline_result[..]);
 }
 
 #[test]
 fn no_path_translation() {
     assert_eq!(
-        &*translate_path_to_win(b"/mnt/other/file.sh"),
+        &*translate_path_to_win_output(b"/mnt/other/file.sh"),
         b"/mnt/other/file.sh");
 }
 
