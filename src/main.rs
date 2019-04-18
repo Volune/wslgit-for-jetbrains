@@ -1,12 +1,11 @@
-use std::env;
-use std::process::{Command, Stdio};
-use std::io::{self, Write};
-use std::borrow::Cow;
-use std::path::{Path, Component, PrefixComponent, Prefix};
-
 #[macro_use]
 extern crate lazy_static;
 extern crate regex;
+
+use std::env;
+use std::io::{self, BufRead, BufReader, Write};
+use std::path::{Component, Path, Prefix, PrefixComponent};
+use std::process::{Command, Stdio};
 
 use regex::Regex;
 
@@ -80,39 +79,59 @@ fn translate_path_to_win(unix_path: String) -> String {
     String::from(WSLPATH_RE.replace(unix_path.as_str(), "${drive}:${path}"))
 }
 
-fn translate_path_to_win_output(line: &[u8]) -> Cow<[u8]> {
+fn translate_path_to_win_output(line: String) -> String {
     lazy_static! {
-        static ref WSLPATH_RE: regex::bytes::Regex =
-            regex::bytes::Regex::new(r"(?m-u)/mnt/(?P<drive>[A-Za-z])(?P<path>/\S*)")
+        static ref WSLPATH_RE: Regex =
+            Regex::new(r"(?m-u)/mnt/(?P<drive>[A-Za-z])(?P<path>/\S*)")
                 .expect("Failed to compile WSLPATH regex");
     }
-    WSLPATH_RE.replace_all(line, &b"${drive}:${path}"[..])
+    String::from(WSLPATH_RE.replace_all(line.as_str(), "${drive}:${path}"))
+}
+
+fn is_translated_command(arg: String) -> bool {
+    const TRANSLATED_CMDS: &[&str] = &["rev-parse", "remote"];
+    TRANSLATED_CMDS.contains(&arg.as_str())
+}
+
+fn is_version_command(arg: String) -> bool {
+    const MATCHES: &[&str] = &["version", "--version"];
+    MATCHES.contains(&arg.as_str())
+}
+
+fn arg_matching(f: fn(String) -> bool) -> bool {
+    env::args().skip(1).position(f).is_some()
+}
+
+fn append_version(line: String) -> String {
+    line + " wslgit-for-jetbrains." + env!("CARGO_PKG_VERSION")
 }
 
 fn main() {
-    let cwd_unix = translate_path_to_unix(env::current_dir().unwrap().to_string_lossy().into_owned());
     let mut args: Vec<String> = vec![];
-    let mut git_proc_setup;
-    let mut translate_output = false;
+    let mut proc_setup;
+    let mut opt_transform_output: Option<fn(String) -> String> = None;
 
     if env::args().nth(1).unwrap_or_default() == "win-cmd" {
-        git_proc_setup = Command::new("cmd");
+        proc_setup = Command::new("cmd");
         args.push(String::from("/c"));
         args.extend(env::args().skip(2).map(translate_path_to_win));
     } else {
-        git_proc_setup = Command::new("wsl");
+        proc_setup = Command::new("wsl");
         args.push(String::from("git"));
         args.extend(env::args().skip(1).map(translate_path_to_unix));
 
         // add git commands that must use translate_path_to_win
-        const TRANSLATED_CMDS: &[&str] = &["rev-parse", "remote"];
-        translate_output =
-            env::args().skip(1).position(|arg| TRANSLATED_CMDS.iter().position(|&tcmd| tcmd == arg).is_some()).is_some();
+        if arg_matching(is_translated_command) {
+            opt_transform_output = Some(translate_path_to_win_output);
+        }
+        if arg_matching(is_version_command) {
+            opt_transform_output = Some(append_version);
+        }
 
         let wslgit_cmd = translate_path_to_unix(env::args().nth(0).expect("Cannot find args[0]"));
         match env::var("GIT_EDITOR") {
             Ok(val) => {
-                git_proc_setup
+                proc_setup
                     .env("GIT_EDITOR", wslgit_cmd + " win-cmd " + val.as_str())
                     .env("WSLENV", "GIT_EDITOR/u");
             }
@@ -121,35 +140,29 @@ fn main() {
     }
 
     // setup the git subprocess launched inside WSL
-    git_proc_setup
+    proc_setup
         .args(&args)
-        .stdin(Stdio::inherit());
-    let status;
+        .stdin(Stdio::inherit())
+        .stdout(if opt_transform_output.is_some() { Stdio::piped() } else { Stdio::inherit() })
+        .stderr(Stdio::inherit());
 
-    if translate_output {
-        // run the subprocess and capture its output
-        let git_proc = git_proc_setup.stdout(Stdio::piped())
-            .spawn()
-            .expect(&format!("Failed to execute command '{}'", args.join(" ")));
-        let output = git_proc
-            .wait_with_output()
-            .expect(&format!("Failed to wait for git call '{}'", args.join(" ")));
-        status = output.status;
-        let output_bytes = output.stdout;
-        let mut stdout = io::stdout();
-        stdout
-            .write_all(&translate_path_to_win_output(&output_bytes))
-            .expect("Failed to write git output");
-        stdout.flush().expect("Failed to flush output");
-    } else {
-        // run the subprocess without capturing its output
-        // the output of the subprocess is passed through unchanged
-        status = git_proc_setup
-            .stdout(Stdio::inherit())
-            .status()
-            .expect(&format!("Failed to execute command '{}'", args.join(" ")));
+    let mut child = proc_setup
+        .spawn()
+        .expect(&format!("Failed to execute command '{}'", args.join(" ")));
+
+    if let Some(transform_output) = opt_transform_output {
+        if let Some(ref mut child_stdout) = child.stdout {
+            let child_stdout = BufReader::new(child_stdout);
+            let mut stdout = io::stdout();
+            let lines_iter = child_stdout.lines().filter_map(|l| l.ok());
+            for line in lines_iter {
+                stdout.write_all(transform_output(line).as_bytes()).ok();
+            }
+            stdout.flush().expect("Failed to flush output");
+        }
     }
 
+    let status = child.wait().expect("Failed to wait for command");
     // forward any exit code
     if let Some(exit_code) = status.code() {
         std::process::exit(exit_code);
@@ -170,23 +183,23 @@ fn win_to_unix_path_trans() {
 #[test]
 fn unix_to_win_path_trans() {
     assert_eq!(
-        &*translate_path_to_win_output(b"/mnt/d/some path/a file.md"),
-        b"d:/some path/a file.md");
+        translate_path_to_win_output("/mnt/d/some path/a file.md".to_string()),
+        "d:/some path/a file.md".to_string());
     assert_eq!(
-        &*translate_path_to_win_output(b"origin  /mnt/c/path/ (fetch)"),
-        b"origin  c:/path/ (fetch)");
-    let multiline = b"mirror  /mnt/c/other/ (fetch)\nmirror  /mnt/c/other/ (push)\n";
-    let multiline_result = b"mirror  c:/other/ (fetch)\nmirror  c:/other/ (push)\n";
+        translate_path_to_win_output("origin  /mnt/c/path/ (fetch)".to_string()),
+        "origin  c:/path/ (fetch)");
+    let multiline = "mirror  /mnt/c/other/ (fetch)\nmirror  /mnt/c/other/ (push)\n";
+    let multiline_result = "mirror  c:/other/ (fetch)\nmirror  c:/other/ (push)\n";
     assert_eq!(
-        &*translate_path_to_win_output(&multiline[..]),
+        &*translate_path_to_win_output(String::from(multiline)),
         &multiline_result[..]);
 }
 
 #[test]
 fn no_path_translation() {
     assert_eq!(
-        &*translate_path_to_win_output(b"/mnt/other/file.sh"),
-        b"/mnt/other/file.sh");
+        &*translate_path_to_win_output(String::from("/mnt/other/file.sh")),
+        String::from("/mnt/other/file.sh"));
 }
 
 #[test]
