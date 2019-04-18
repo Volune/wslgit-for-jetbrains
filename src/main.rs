@@ -129,13 +129,19 @@ fn main() {
         }
 
         let wslgit_cmd = translate_path_to_unix(env::args().nth(0).expect("Cannot find args[0]"));
-        match env::var("GIT_EDITOR") {
-            Ok(val) => {
-                proc_setup
-                    .env("GIT_EDITOR", wslgit_cmd + " win-cmd " + val.as_str())
-                    .env("WSLENV", "GIT_EDITOR/u");
+        let mut wsl_env: Vec<String> = vec![];
+        for (ref env_key, ref env_val) in env::vars() {
+            if env_key.starts_with("GIT_") {
+                if env_key == "GIT_EDITOR" {
+                    proc_setup.env("GIT_EDITOR", format!("{} win-cmd {}", wslgit_cmd, env_val));
+                } else {
+                    proc_setup.env(env_key, env_val);
+                }
+                wsl_env.push(format!("{}/u", env_key));
             }
-            _ => {}
+        }
+        if !wsl_env.is_empty() {
+            proc_setup.env("WSLENV", wsl_env.join(":"));
         }
     }
 
