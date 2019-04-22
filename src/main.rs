@@ -22,7 +22,7 @@ fn get_drive_letter(pc: &PrefixComponent) -> Option<String> {
     })
 }
 
-fn get_prefix_for_drive(drive: &str) -> String {
+fn get_prefix_for_drive(drive: String) -> String {
     // todo - lookup mount points
     format!("/mnt/{}", drive)
 }
@@ -40,31 +40,23 @@ fn translate_path_to_unix(argument: String) -> String {
         };
         let win_path = Path::new(arg);
         if win_path.is_absolute() || win_path.exists() {
-            let wsl_path: String = win_path.components().fold(
-                String::new(), |mut acc, c| {
-                    match c {
+            let wsl_path = win_path
+                .components()
+                .filter_map(|comp| {
+                    let comp: Option<String> = match comp {
                         Component::Prefix(prefix_comp) => {
-                            let d = get_drive_letter(&prefix_comp).expect(
-                                &format!("Cannot handle path {:?}",
-                                         win_path));
-                            acc.push_str(&get_prefix_for_drive(&d));
+                            let drive_letter = get_drive_letter(&prefix_comp)
+                                .expect(&format!("Cannot handle path {:?}", win_path));
+                            Some(get_prefix_for_drive(drive_letter))
                         }
-                        Component::RootDir => {}
-                        _ => {
-                            let d = c.as_os_str().to_str()
-                                .expect(
-                                    &format!("Cannot represent path {:?}",
-                                             win_path))
-                                .to_owned();
-                            if !acc.is_empty() && !acc.ends_with('/') {
-                                acc.push('/');
-                            }
-                            acc.push_str(&d);
-                        }
+                        Component::RootDir => None,
+                        _ => comp.as_os_str().to_str().map(String::from)
                     };
-                    acc
-                });
-            return format!("{}{}", &argname, &wsl_path);
+                    comp
+                })
+                .collect::<Vec<String>>()
+                .join("/");
+            return format!("{}{}", &argname, wsl_path);
         }
     }
     argument
