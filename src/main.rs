@@ -28,6 +28,9 @@ fn get_prefix_for_drive(drive: String) -> String {
 }
 
 fn translate_path_to_unix(argument: String) -> String {
+    lazy_static! {
+        static ref ESCAPE_RE: Regex = Regex::new(r"[^a-zA-Z0-9,._+@%/-]").expect("Failed to compile SPACE regex");
+    }
     {
         let (argname, arg) = if argument.starts_with("--")
             && argument.contains('=') {
@@ -50,7 +53,10 @@ fn translate_path_to_unix(argument: String) -> String {
                             Some(get_prefix_for_drive(drive_letter))
                         }
                         Component::RootDir => None,
-                        _ => comp.as_os_str().to_str().map(String::from)
+                        _ => comp
+                            .as_os_str()
+                            .to_str()
+                            .map(|s| String::from(ESCAPE_RE.replace_all(s, "\\$0")))
                     };
                     comp
                 })
@@ -175,7 +181,7 @@ fn win_to_unix_path_trans() {
         "/mnt/d/test/file.txt");
     assert_eq!(
         translate_path_to_unix("C:\\Users\\test\\a space.txt".to_string()),
-        "/mnt/c/Users/test/a space.txt");
+        "/mnt/c/Users/test/a\\ space.txt");
 }
 
 #[test]
