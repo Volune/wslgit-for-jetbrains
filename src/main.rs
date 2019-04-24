@@ -2,20 +2,31 @@
 extern crate lazy_static;
 extern crate regex;
 
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf, Prefix, PrefixComponent};
 use std::process::{Command, Stdio};
 
-use regex::Regex;
+use regex::{Captures, Regex};
 
 const CONFIG_FOLDER: &str = "wslgit-for-jetbrains";
 const MAPPING_FILENAME: &str = "mapping.txt";
 
 lazy_static! {
     static ref DRIVE_TO_PATH_MAP: HashMap<String, String> = build_drive_to_path_mapping();
+    static ref WSLPATH_RE: Regex =
+        if DRIVE_TO_PATH_MAP.is_empty() {
+            Regex::new(r"(?m-u)/mnt/(?P<drive>[A-Za-z]\b)")
+        } else {
+            let paths_regex = DRIVE_TO_PATH_MAP.values()
+                .map(|value| value.to_string())
+                .collect::<Vec<String>>()
+                .join("|");
+            Regex::new(&format!(r"(?m-u)(?:(?P<mapped_path>{})|/mnt/(?P<drive>[A-Za-z]\b))", paths_regex))
+        }
+            .expect("Failed to compile WSLPATH regex");
 }
 
 fn get_mapping_config_path() -> PathBuf {
@@ -47,8 +58,11 @@ fn get_drive_letter(pc: &PrefixComponent) -> Option<String> {
 }
 
 fn get_prefix_for_drive(drive: String) -> String {
-    // todo - lookup mount points
-    format!("/mnt/{}", drive)
+    if let Some(mapped_path) = DRIVE_TO_PATH_MAP.get(&drive) {
+        mapped_path.to_string()
+    } else {
+        format!("/mnt/{}", drive)
+    }
 }
 
 fn translate_path_to_unix(argument: String) -> String {
@@ -92,22 +106,29 @@ fn translate_path_to_unix(argument: String) -> String {
     argument
 }
 
+fn replace_with_drive(captures: &Captures) -> String {
+    let drive =
+        if let Some(matched_path) = captures.name("mapped_path") {
+            let matched_path = matched_path.as_str();
+            DRIVE_TO_PATH_MAP
+                .iter()
+                .find(|(_, ref mapped_path)| mapped_path.as_str() == matched_path)
+                .expect("Cannot find matched path in mapping")
+                .0
+        } else if let Some(drive) = captures.name("drive") {
+            drive.as_str()
+        } else {
+            captures.get(0).expect("No match").as_str()
+        };
+    format!("{}:", drive)
+}
+
 fn translate_path_to_win(unix_path: String) -> String {
-    lazy_static! {
-        static ref WSLPATH_RE: Regex =
-            Regex::new(r"(?m-u)/mnt/(?P<drive>[A-Za-z])(?P<path>/\S*)")
-                .expect("Failed to compile WSLPATH regex");
-    }
-    String::from(WSLPATH_RE.replace(unix_path.as_str(), "${drive}:${path}"))
+    String::from(WSLPATH_RE.replace(unix_path.as_str(), replace_with_drive))
 }
 
 fn translate_path_to_win_output(line: String) -> String {
-    lazy_static! {
-        static ref WSLPATH_RE: Regex =
-            Regex::new(r"(?m-u)/mnt/(?P<drive>[A-Za-z])(?P<path>/\S*)")
-                .expect("Failed to compile WSLPATH regex");
-    }
-    String::from(WSLPATH_RE.replace_all(line.as_str(), "${drive}:${path}"))
+    String::from(WSLPATH_RE.replace_all(line.as_str(), replace_with_drive))
 }
 
 fn is_translated_command(arg: String) -> bool {
@@ -155,7 +176,7 @@ fn command_generate_mapping() {
     let config_path_str = mapping_config_path.to_str().expect("Cannot generate config path");
     let mut mount_child = Command::new("wsl")
         .args(&["mount"])
-        .stdout( Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .expect("Failed to run 'mount'");
