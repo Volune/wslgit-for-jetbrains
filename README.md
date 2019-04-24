@@ -7,7 +7,7 @@ This project helps integrate Jetbrains IDEs with WSL.
 ## Download
 
 The latest binary release can be found on the
-[TODO releases page](#).
+[releases page](https://github.com/Volune/wslgit-for-jetbrains/releases).
 
 ## How to use
 
