@@ -2,12 +2,36 @@
 extern crate lazy_static;
 extern crate regex;
 
+use std::collections::{HashMap};
 use std::env;
+use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
-use std::path::{Component, Path, Prefix, PrefixComponent};
+use std::path::{Component, Path, PathBuf, Prefix, PrefixComponent};
 use std::process::{Command, Stdio};
 
 use regex::Regex;
+
+const CONFIG_FOLDER: &str = "wslgit-for-jetbrains";
+const MAPPING_FILENAME: &str = "mapping.txt";
+
+lazy_static! {
+    static ref DRIVE_TO_PATH_MAP: HashMap<String, String> = build_drive_to_path_mapping();
+}
+
+fn get_mapping_config_path() -> PathBuf {
+    env::var("LOCALAPPDATA")
+        .ok()
+        .map(|appdata| {
+            [
+                appdata.as_str(),
+                CONFIG_FOLDER,
+                MAPPING_FILENAME
+            ]
+                .iter()
+                .collect::<PathBuf>()
+        })
+        .expect("Cannot compute config path")
+}
 
 fn get_drive_letter(pc: &PrefixComponent) -> Option<String> {
     let drive_byte = match pc.kind() {
@@ -104,12 +128,91 @@ fn append_version(line: String) -> String {
     line + " wslgit-for-jetbrains." + env!("CARGO_PKG_VERSION")
 }
 
+fn build_drive_to_path_mapping() -> HashMap<String, String> {
+    let mut drive_to_path_map = HashMap::new();
+    let mapping_config_path = get_mapping_config_path();
+    if mapping_config_path.exists() {
+        let config_file = File::open(mapping_config_path.as_path())
+            .expect("Cannot open config file");
+        let reader = BufReader::new(config_file);
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                let drive_and_path = line.splitn(2, " ").collect::<Vec<&str>>();
+                drive_to_path_map.insert(drive_and_path[0].to_string(), drive_and_path[1].to_string());
+            }
+        }
+    }
+    drive_to_path_map
+}
+
+fn command_generate_mapping() {
+    lazy_static! {
+        static ref DRIVE_MAPPING_RE: Regex =
+            Regex::new(r"^(?P<drive>[a-zA-Z]):\s+on\s+(?P<path>\S+)")
+                .expect("Failed to compile DRIVE_MAPPING regex");
+    }
+    let mapping_config_path = get_mapping_config_path();
+    let config_path_str = mapping_config_path.to_str().expect("Cannot generate config path");
+    let mut mount_child = Command::new("wsl")
+        .args(&["mount"])
+        .stdout( Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("Failed to run 'mount'");
+    if let Some(ref mut child_stdout) = mount_child.stdout {
+        let child_stdout = BufReader::new(child_stdout);
+        let lines_iter = child_stdout
+            .lines()
+            .filter_map(|l| l.ok());
+        let config_folder = mapping_config_path.parent().expect("No config folder");
+        fs::create_dir_all(config_folder).expect("Cannot create config folder");
+        let mut config_file = File::create(mapping_config_path.as_path())
+            .expect(&format!("Cannot create config file {}", config_path_str));
+        println!("{}", config_path_str);
+        for line in lines_iter {
+            if let Some(capture) = DRIVE_MAPPING_RE.captures(&line) {
+                let drive = capture.name("drive")
+                    .expect("Cannot find capture group 'drive'")
+                    .as_str()
+                    .to_lowercase();
+                let mount_path = capture.name("path")
+                    .expect("Cannot find capture group 'path'")
+                    .as_str();
+                write!(config_file, "{} {}\n", drive, mount_path)
+                    .expect("Cannot write to config file");
+                println!("{} <-> {}", drive, mount_path);
+            }
+        }
+    }
+}
+
+fn command_show_mapping() {
+    let mapping_config_path = get_mapping_config_path();
+    let config_path_str = mapping_config_path.to_str().expect("Cannot generate config path");
+    if mapping_config_path.exists() {
+        println!("{}", config_path_str);
+        for (drive, unix_path) in DRIVE_TO_PATH_MAP.iter() {
+            println!("{} <-> {}", drive, unix_path);
+        }
+    } else {
+        println!("{} not found", config_path_str);
+    }
+}
+
 fn main() {
     let mut args: Vec<String> = vec![];
     let mut proc_setup;
     let mut opt_transform_output: Option<fn(String) -> String> = None;
 
-    if env::args().nth(1).unwrap_or_default() == "win-cmd" {
+    let first_arg = env::args().nth(1).unwrap_or_default();
+
+    if first_arg == "win-show-mapping" {
+        command_show_mapping();
+        return;
+    } else if first_arg == "win-generate-mapping" {
+        command_generate_mapping();
+        return;
+    } else if first_arg == "win-cmd" {
         proc_setup = Command::new("cmd");
         args.push(String::from("/c"));
         args.extend(env::args().skip(2).map(translate_path_to_win));
