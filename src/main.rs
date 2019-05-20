@@ -169,7 +169,7 @@ fn build_drive_to_path_mapping() -> HashMap<String, String> {
 fn command_generate_mapping() {
     lazy_static! {
         static ref DRIVE_MAPPING_RE: Regex =
-            Regex::new(r"^(?P<drive>[a-zA-Z]):\s+on\s+(?P<path>\S+)")
+            Regex::new(r"^(?P<drive>[a-zA-Z]):[/\\]?\s+on\s+(?P<path>\S+)")
                 .expect("Failed to compile DRIVE_MAPPING regex");
     }
     let mapping_config_path = get_mapping_config_path();

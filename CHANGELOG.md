@@ -1,3 +1,18 @@
+# WSLGit-For-Jetbrains Changelog
+
+## [1.0.1] - 2019-05-20
+
+### Fixed
+
+- Fix parsing `mount` output
+
+## [1.0.0] - 2019-04-24
+
+Release of the fork dedicated to IDE integration.
+
+- Added commands for disk mapping `win-generate-mapping` and `win-show-mapping`
+- Passes env to git
+
 # WSLGit Changelog
 
 ## [0.7.0] - 2019-01-24
