@@ -131,6 +131,10 @@ fn translate_path_to_win_output(line: String) -> String {
     String::from(WSLPATH_RE.replace_all(line.as_str(), replace_with_drive))
 }
 
+fn identity(line: String) -> String {
+    line
+}
+
 fn is_translated_command(arg: String) -> bool {
     const TRANSLATED_CMDS: &[&str] = &["rev-parse", "remote"];
     TRANSLATED_CMDS.contains(&arg.as_str())
@@ -223,7 +227,7 @@ fn command_show_mapping() {
 fn main() {
     let mut args: Vec<String> = vec![];
     let mut proc_setup;
-    let mut opt_transform_output: Option<fn(String) -> String> = None;
+    let mut transform_output: fn(String) -> String = identity;
 
     let first_arg = env::args().nth(1).unwrap_or_default();
 
@@ -244,10 +248,10 @@ fn main() {
 
         // add git commands that must use translate_path_to_win
         if arg_matching(is_translated_command) {
-            opt_transform_output = Some(translate_path_to_win_output);
+            transform_output = translate_path_to_win_output;
         }
         if arg_matching(is_version_command) {
-            opt_transform_output = Some(append_version);
+            transform_output = append_version;
         }
 
         let wslgit_cmd = translate_path_to_unix(env::args().nth(0).expect("Cannot find args[0]"));
@@ -271,27 +275,30 @@ fn main() {
     proc_setup
         .args(&args)
         .stdin(Stdio::inherit())
-        .stdout(if opt_transform_output.is_some() { Stdio::piped() } else { Stdio::inherit() })
+        .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
     let mut child = proc_setup
         .spawn()
         .expect(&format!("Failed to execute command '{}'", args.join(" ")));
 
-    if let Some(transform_output) = opt_transform_output {
-        if let Some(ref mut child_stdout) = child.stdout {
-            let child_stdout = BufReader::new(child_stdout);
-            let mut stdout = io::stdout();
-            let lines_iter = child_stdout.lines().filter_map(|l| l.ok());
-            for line in lines_iter {
-                stdout.write_all(transform_output(line).as_bytes()).ok();
-                stdout.write_all(b"\n").ok();
-            }
-            stdout.flush().expect("Failed to flush output");
+    if let Some(ref mut child_stdout) = child.stdout {
+        // Don't know why, but it seems to fix issues reading full output from child stdout
+        const BUFFER_CAPACITY: usize = 1 * 1024 * 1024;
+        let child_stdout = BufReader::with_capacity(BUFFER_CAPACITY, child_stdout);
+        let mut stdout = io::stdout();
+        let lines_iter = child_stdout.lines().filter_map(|l| l.ok());
+        for line in lines_iter {
+            let transformed_output = transform_output(line);
+            stdout.write_all(transformed_output.as_bytes()).ok();
+            stdout.write_all(b"\n").ok();
         }
     }
 
     let status = child.wait().expect("Failed to wait for command");
+
+    io::stdout().flush().expect("Failed to flush output");
+
     // forward any exit code
     if let Some(exit_code) = status.code() {
         std::process::exit(exit_code);
