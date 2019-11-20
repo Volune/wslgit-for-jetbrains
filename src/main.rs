@@ -285,6 +285,7 @@ fn main() {
             let lines_iter = child_stdout.lines().filter_map(|l| l.ok());
             for line in lines_iter {
                 stdout.write_all(transform_output(line).as_bytes()).ok();
+                stdout.write_all(b"\n").ok();
             }
             stdout.flush().expect("Failed to flush output");
         }
