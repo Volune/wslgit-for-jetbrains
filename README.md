@@ -4,6 +4,10 @@ Based on the great [WSLGit](https://github.com/andy-5/wslgit) project.
 
 This project helps integrate Jetbrains IDEs with WSL.
 
+## WARNING
+
+The project may not work correctly with some commands (ex: blame, log) due to [WSL output being truncated](https://github.com/microsoft/WSL/issues/4082).
+
 ## Download
 
 The latest binary release can be found on the
